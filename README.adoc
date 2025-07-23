@@ -1,0 +1,145 @@
+= CMake generators expression
+Using generator expressions can configure project differently for several build types in multi-configuration generators.
+
+:toc:
+:sectnums:
+
+== Introduction
+Using generator expressions one can configure the project differently for different build types in multi-configuration generators. For such generators the project is configured (with running cmake) once, but can be built for several build types after that. Example of such generators can be Visual Studio.
+
+== Multi configuration
+For multiconfigurations generators, `CMAKE_BUILD_TYPE` is not known at configuration stage. Because of that using if-else switching doesn't work:
+
+```cmake
+if (CMAKE_BUILD_TYPE STREQUAL "Debug")
+    add_compile_options("/W4 /WX")
+else if (CMAKE_BUILD_TYPE STREQUAL "Release")
+    add_compile_options("/W4")
+endif()
+```
+
+NOTE: This multi-configuration can change flags of the compilation depending on the step we're in. For instance, a debug will enable the `-g` while the release won't.
+
+WARNING: The multi configuration (as you can see above) give some benefits while using CMake, although the drawback is at configure time, this generator do not know which build time is currently active.
+
+Hence, the code above will be completely ignored, instead, you'll have to use generator expression like the expression stated below.
+
+```cmake
+add_compile_options(
+    $<$<CONFIG:Debug>>:/W4 /WX
+    $<$<CONFIG:Release>>:/W4
+)
+```
+
+IMPORTANT: If you are an `if` statement for compile options, you'll have to use this generator expression.
+
+=== Generator expressions introduction
+Generator expressions are evaluated during build system generation to produce information specific to each build configuration. They have the form `$<...>`. For example
+
+```cmake
+target_include_directories(<target> PRIVATE /opt/include/$<CXX_COMPILER_ID>)
+```
+The code above would expand to `/opt/include/GNU`, `/opt/include/Clang`, etc. Depending on the C++ compiler used.
+
+Generator expressions are allowed in the context of many target properties, such as link:https://cmake.org/cmake/help/latest/prop_tgt/LINK_LIBRARIES.html#prop_tgt:LINK_LIBRARIES[LINK_LIBRARIES], link:https://cmake.org/cmake/help/latest/prop_tgt/INCLUDE_DIRECTORIES.html#prop_tgt:INCLUDE_DIRECTORIES[INCLUDE_DIRECTORIES], link:https://cmake.org/cmake/help/latest/prop_tgt/COMPILE_DEFINITIONS.html#prop_tgt:COMPILE_DEFINITIONS[COMPILE_DEFINITIONS] and others. They may also be used when using commands to populate those properties, such as link:https://cmake.org/cmake/help/latest/command/target_link_libraries.html#command:target_link_libraries[target_link_libraries()], link:https://cmake.org/cmake/help/latest/command/target_include_directories.html#command:target_include_directories[target_include_directories()] and link:https://cmake.org/cmake/help/latest/command/target_compile_definitions.html#command:target_compile_definitions[target_compile_definitions()], and others. They enable conditional linking, conditional definitions used when compiling, conditional include directories, and more. The conditions may be based on the build configuration, target properties, platform information, or any other queryable information.
+
+NOTE: Moreover, the generator expression can als be nested
+
+```cmake
+target_compile_definitions(target PRIVATE
+    $<$<VERSION_LESS:$<CXX_COMPILER_VERSION>,4.2.0>:OLD_COMPILER>
+)
+```
+The above code would expand to `OLD_COMPILER` if the link:https://cmake.org/cmake/help/latest/variable/CMAKE_LANG_COMPILER_VERSION.html#variable:CMAKE_%3CLANG%3E_COMPILER_VERSION[CMAKE_CXX_COMPILER_VERSION] is less than 4.2.0
+
+=== Generators expressions syntax
+As you see at the code below, the expression:
+```cmake
+add_compile_options(
+    $<$<CONFIG:Debug>>: -W -Wextra -Werror -ansi -pedantic
+    $<$<CONFIG:Release>>: -ansi -pedantic
+)
+```
+Will change some compiler option depending on the `CONFIG` you are choosing, during the last step of the compilation
+
+IMPORTANT: Something to note is that the generator expression don't care about the flags until the last build time.
+
+=== Generator expression white space and quoting
+Generator expressions are typically parsed after command arguments. If a generator expression contains spacing, new lines, semicolons or other characters that may be interpreted as command argument separators, the whole expression should be surrounded by quotes when passed to a command. Failure to do so may result in the expression being split and it may no longer be recognized as a generator expression.
+
+For example, when using link:https://cmake.org/cmake/help/latest/command/add_custom_command.html#command:add_custom_command[add_custom_command()] or link:https://cmake.org/cmake/help/latest/command/add_custom_target.html#command:add_custom_target[add_custom_target()], use the `VERBATIM` and `COMMAND_EXPAND_LISTS` options to obtain robust argument splitting and quoting:
+
+```cmake
+# WRONG: Embedded space will be treated as an argument separator.
+# This ends up not being seen as a generator expression at all.
+add_custom_target(run_some_tool
+  COMMAND some_tool -I$<JOIN:$<TARGET_PROPERTY:tgt,INCLUDE_DIRECTORIES>, -I>
+  VERBATIM
+)
+```
+
+```cmake
+# Better, but still not robust. Quotes prevent the space from splitting the
+# expression. However, the tool will receive the expanded value as a single
+# argument.
+add_custom_target(run_some_tool
+  COMMAND some_tool "-I$<JOIN:$<TARGET_PROPERTY:tgt,INCLUDE_DIRECTORIES>, -I>"
+  VERBATIM
+)
+```
+
+```cmake
+# Nearly correct. Using a semicolon to separate arguments and adding the
+# COMMAND_EXPAND_LISTS option means that paths with spaces will be handled
+# correctly. Quoting the whole expression ensures it is seen as a generator
+# expression. But if the target property is empty, we will get a bare -I
+# with nothing after it.
+add_custom_target(run_some_tool
+  COMMAND some_tool "-I$<JOIN:$<TARGET_PROPERTY:tgt,INCLUDE_DIRECTORIES>,;-I>"
+  COMMAND_EXPAND_LISTS
+  VERBATIM
+)
+```
+
+Using variables to build up a more complex generator expression is also a good way to reduce errors and improve readability. The above example can be improved further like so:
+
+```cmake
+# The $<BOOL:...> check prevents adding anything if the property is empty,
+# assuming the property value cannot be one of CMake's false constants.
+set(prop "$<TARGET_PROPERTY:tgt,INCLUDE_DIRECTORIES>")
+add_custom_target(run_some_tool
+  COMMAND some_tool "$<$<BOOL:${prop}>:-I$<JOIN:${prop},;-I>>"
+  COMMAND_EXPAND_LISTS
+  VERBATIM
+)
+```
+
+Finally, the above example can be expressed in a more simple and robust way using an alternate generator expression:
+
+```cmake
+add_custom_target(run_some_tool
+  COMMAND some_tool "$<LIST:TRANSFORM,$<TARGET_PROPERTY:tgt,INCLUDE_DIRECTORIES>,PREPEND,-I>"
+  COMMAND_EXPAND_LISTS
+  VERBATIM
+)
+```
+A common mistake is to try to split a generator expression across multiple lines with indenting:
+```cmake
+# WRONG: New lines and spaces all treated as argument separators, so the
+# generator expression is split and not recognized correctly.
+target_compile_definitions(tgt PRIVATE
+  $<$<AND:
+      $<CXX_COMPILER_ID:GNU>,
+      $<VERSION_GREATER_EQUAL:$<CXX_COMPILER_VERSION>,5>
+    >:HAVE_5_OR_LATER>
+)
+```
+Again, use helper variables with well-chosen names to build up a readable expression instead:
+```cmake
+set(is_gnu "$<CXX_COMPILER_ID:GNU>")
+set(v5_or_later "$<VERSION_GREATER_EQUAL:$<CXX_COMPILER_VERSION>,5>")
+set(meet_requirements "$<AND:${is_gnu},${v5_or_later}>")
+target_compile_definitions(tgt PRIVATE
+  "$<${meet_requirements}:HAVE_5_OR_LATER>"
+)
+```
